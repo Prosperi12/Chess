@@ -1,0 +1,400 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>CDN Playable Chess</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script src="https://unpkg.com/react@18/umd/react.development.js"></script>
+  <script src="https://unpkg.com/react-dom@18/umd/react-dom.development.js"></script>
+  <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/chess.js/0.10.3/chess.min.js"></script>
+</head>
+
+<body class="bg-gray-900 text-white min-h-screen flex items-center justify-center p-4">
+  <div id="root"></div>
+
+  <script type="text/babel">
+    const { useEffect, useMemo, useState } = React;
+
+    function ChessApp() {
+      const [game, setGame] = useState(new Chess());
+      const [selectedSquare, setSelectedSquare] = useState(null);
+      const [optionSquares, setOptionSquares] = useState([]);
+
+      // --- Enhancement state ---
+      const [lastMove, setLastMove] = useState(null); // { from, to }
+      const [undoStack, setUndoStack] = useState([]); // snapshots
+      const [redoStack, setRedoStack] = useState([]); // snapshots
+      const [capturedWhite, setCapturedWhite] = useState([]); // pieces captured FROM white (so black captured them)
+      const [capturedBlack, setCapturedBlack] = useState([]); // pieces captured FROM black (so white captured them)
+
+      const themes = {
+        slate: { light: "bg-slate-400", dark: "bg-slate-700" },
+        green: { light: "bg-emerald-200", dark: "bg-emerald-700" },
+        brown: { light: "bg-amber-200", dark: "bg-amber-800" },
+      };
+
+      const [themeKey, setThemeKey] = useState("slate");
+      const [flipped, setFlipped] = useState(false);
+
+      // Mapping pieces to Unicode
+      const pieceSymbols = {
+        p: "♟", r: "♜", n: "♞", b: "♝", q: "♛", k: "♚",
+        P: "♙", R: "♖", N: "♘", B: "♗", Q: "♕", K: "♔"
+      };
+
+      // --- Enhancement: persist theme + flip ---
+      useEffect(() => {
+        const savedTheme = localStorage.getItem("chess_theme");
+        const savedFlip = localStorage.getItem("chess_flip");
+        if (savedTheme && themes[savedTheme]) setThemeKey(savedTheme);
+        if (savedFlip === "true") setFlipped(true);
+      }, []);
+
+      useEffect(() => {
+        localStorage.setItem("chess_theme", themeKey);
+      }, [themeKey]);
+
+      useEffect(() => {
+        localStorage.setItem("chess_flip", flipped ? "true" : "false");
+      }, [flipped]);
+
+      const theme = themes[themeKey] || themes.slate;
+
+      const board = game.board();
+
+      function getSquareLabel(i, j) {
+        return String.fromCharCode(97 + j) + (8 - i);
+      }
+
+      // For flipped board: display cell (di,dj) maps to actual cell (ai,aj)
+      function getActualCoords(di, dj) {
+        return flipped ? { ai: 7 - di, aj: 7 - dj } : { ai: di, aj: dj };
+      }
+
+      function makeSnapshot() {
+        return {
+          fen: game.fen(),
+          capturedWhite: [...capturedWhite],
+          capturedBlack: [...capturedBlack],
+          lastMove: lastMove ? { ...lastMove } : null,
+        };
+      }
+
+      function applySnapshot(snap) {
+        const newGame = new Chess(snap.fen);
+        setGame(newGame);
+        setCapturedWhite(snap.capturedWhite);
+        setCapturedBlack(snap.capturedBlack);
+        setLastMove(snap.lastMove);
+        setSelectedSquare(null);
+        setOptionSquares([]);
+      }
+
+      function handleSquareClick(square) {
+        // Enhancement: click same square again to deselect
+        if (selectedSquare && square === selectedSquare) {
+          setSelectedSquare(null);
+          setOptionSquares([]);
+          return;
+        }
+
+        // If a square is already selected, try to move there
+        if (selectedSquare) {
+          const before = makeSnapshot();
+
+          const move = game.move({
+            from: selectedSquare,
+            to: square,
+            promotion: "q" // Keep your core: always queen
+          });
+
+          if (move) {
+            // Enhancement: push undo snapshot + clear redo
+            setUndoStack(prev => [...prev, before]);
+            setRedoStack([]);
+
+            // Enhancement: capture tracking
+            if (move.captured) {
+              // move.color is mover's color; captured piece is opposite
+              const capturedColor = move.color === "w" ? "b" : "w";
+              const capturedType = move.captured; // like 'p','q'
+              const symbolKey = capturedColor === "w" ? capturedType.toUpperCase() : capturedType;
+              const symbol = pieceSymbols[symbolKey];
+
+              if (capturedColor === "w") setCapturedWhite(prev => [...prev, symbol]);
+              else setCapturedBlack(prev => [...prev, symbol]);
+            }
+
+            // Enhancement: last move highlight
+            setLastMove({ from: move.from, to: move.to });
+
+            setGame(new Chess(game.fen())); // your core re-render approach
+            setSelectedSquare(null);
+            setOptionSquares([]);
+            return;
+          }
+        }
+
+        // Otherwise, select the piece and show legal moves
+        const piece = game.get(square);
+        if (piece && piece.color === game.turn()) {
+          setSelectedSquare(square);
+          const moves = game.moves({ square, verbose: true });
+          setOptionSquares(moves.map(m => m.to));
+        } else {
+          setSelectedSquare(null);
+          setOptionSquares([]);
+        }
+      }
+
+      // Enhancement: Undo
+      function undoMove() {
+        if (undoStack.length === 0) return;
+        const current = makeSnapshot();
+        const prev = undoStack[undoStack.length - 1];
+
+        setUndoStack(stack => stack.slice(0, -1));
+        setRedoStack(stack => [...stack, current]);
+
+        applySnapshot(prev);
+      }
+
+      // Enhancement: Redo
+      function redoMove() {
+        if (redoStack.length === 0) return;
+        const current = makeSnapshot();
+        const next = redoStack[redoStack.length - 1];
+
+        setRedoStack(stack => stack.slice(0, -1));
+        setUndoStack(stack => [...stack, current]);
+
+        applySnapshot(next);
+      }
+
+      const resetGame = () => {
+        // Enhancement: confirm reset
+        const ok = confirm("Start a new game? This will reset the board and history.");
+        if (!ok) return;
+
+        const newGame = new Chess();
+        setGame(newGame);
+        setSelectedSquare(null);
+        setOptionSquares([]);
+        setLastMove(null);
+        setUndoStack([]);
+        setRedoStack([]);
+        setCapturedWhite([]);
+        setCapturedBlack([]);
+      };
+
+      const status = () => {
+        if (game.in_checkmate()) return `Checkmate! ${game.turn() === "w" ? "Black" : "White"} wins.`;
+        if (game.in_draw()) return "Draw!";
+        return `${game.turn() === "w" ? "White's" : "Black's"} Turn`;
+      };
+
+      // Enhancement: move history panel
+      const historyVerbose = useMemo(() => game.history({ verbose: true }), [game]);
+      const pairedHistory = useMemo(() => {
+        const pairs = [];
+        for (let i = 0; i < historyVerbose.length; i += 2) {
+          pairs.push({
+            moveNumber: Math.floor(i / 2) + 1,
+            white: historyVerbose[i]?.san || "",
+            black: historyVerbose[i + 1]?.san || "",
+          });
+        }
+        return pairs;
+      }, [historyVerbose]);
+
+      const files = ["a","b","c","d","e","f","g","h"];
+      const ranks = ["8","7","6","5","4","3","2","1"];
+
+      return (
+        <div className="flex flex-col items-center gap-6 w-full max-w-5xl">
+          <div className="text-center">
+            <h1 className="text-3xl font-bold text-yellow-500 mb-2">React CDN Chess</h1>
+            <p className={`text-lg font-medium ${game.in_check() ? "text-red-500 animate-pulse" : "text-gray-300"}`}>
+              {status()}
+            </p>
+          </div>
+
+          {/* Enhancement controls */}
+          <div className="flex flex-wrap items-center justify-center gap-3">
+            <button
+              onClick={undoMove}
+              disabled={undoStack.length === 0}
+              className={`px-4 py-2 rounded-lg font-bold transition-all shadow-lg active:scale-95
+                ${undoStack.length === 0 ? "bg-gray-700 opacity-50 cursor-not-allowed" : "bg-blue-600 hover:bg-blue-500"}`}
+            >
+              Undo
+            </button>
+
+            <button
+              onClick={redoMove}
+              disabled={redoStack.length === 0}
+              className={`px-4 py-2 rounded-lg font-bold transition-all shadow-lg active:scale-95
+                ${redoStack.length === 0 ? "bg-gray-700 opacity-50 cursor-not-allowed" : "bg-indigo-600 hover:bg-indigo-500"}`}
+            >
+              Redo
+            </button>
+
+            <button
+              onClick={() => setFlipped(f => !f)}
+              className="bg-gray-700 hover:bg-gray-600 px-4 py-2 rounded-lg font-bold transition-all shadow-lg active:scale-95"
+            >
+              Flip Board
+            </button>
+
+            <div className="flex items-center gap-2 bg-gray-800 px-3 py-2 rounded-lg shadow-lg">
+              <span className="text-sm text-gray-300">Theme:</span>
+              <select
+                value={themeKey}
+                onChange={(e) => setThemeKey(e.target.value)}
+                className="bg-gray-900 border border-gray-700 rounded px-2 py-1 text-sm"
+              >
+                <option value="slate">Slate</option>
+                <option value="green">Green</option>
+                <option value="brown">Brown</option>
+              </select>
+            </div>
+          </div>
+
+          <div className="grid grid-cols-1 lg:grid-cols-[auto,320px] gap-6 w-full items-start justify-center">
+            {/* Board + coords */}
+            <div className="flex flex-col items-center">
+              {/* File labels (top) */}
+              <div className="grid grid-cols-9 w-fit mb-1 text-xs text-gray-300 select-none">
+                <div className="w-6 md:w-7"></div>
+                {files.map(f => (
+                  <div key={"top-"+f} className="w-12 md:w-16 text-center">{flipped ? files[7 - files.indexOf(f)] : f}</div>
+                ))}
+              </div>
+
+              {/* Board with rank labels */}
+              <div className="grid grid-cols-9 border-4 border-gray-700 shadow-2xl">
+                {Array.from({ length: 8 }).map((_, di) => {
+                  const rankLabel = flipped ? String(di + 1) : String(8 - di);
+
+                  return (
+                    <React.Fragment key={"row-"+di}>
+                      {/* Rank label */}
+                      <div className="w-6 md:w-7 flex items-center justify-center bg-gray-800 text-xs text-gray-300 select-none">
+                        {rankLabel}
+                      </div>
+
+                      {/* Squares */}
+                      {Array.from({ length: 8 }).map((_, dj) => {
+                        const { ai, aj } = getActualCoords(di, dj);
+                        const squareLabel = getSquareLabel(ai, aj);
+                        const square = board[ai][aj];
+
+                        const isDark = (ai + aj) % 2 === 1;
+                        const isSelected = selectedSquare === squareLabel;
+                        const isOption = optionSquares.includes(squareLabel);
+                        const isLastMove =
+                          (lastMove?.from === squareLabel) || (lastMove?.to === squareLabel);
+
+                        return (
+                          <div
+                            key={squareLabel}
+                            onClick={() => handleSquareClick(squareLabel)}
+                            className={`w-12 h-12 md:w-16 md:h-16 flex items-center justify-center text-4xl cursor-pointer relative
+                              ${isDark ? theme.dark : theme.light}
+                              ${isSelected ? "ring-4 ring-yellow-300/80" : ""}
+                              ${isLastMove ? "outline outline-4 outline-yellow-500/60" : ""}
+                              hover:brightness-110 transition
+                            `}
+                          >
+                            {/* Legal move indicator */}
+                            {isOption && (
+                              <div className="absolute w-4 h-4 bg-black/20 rounded-full z-0"></div>
+                            )}
+
+                            <span className={`z-10 select-none ${square?.color === "w" ? "text-white drop-shadow-md" : "text-black"}`}>
+                              {square ? pieceSymbols[square.color === "w" ? square.type.toUpperCase() : square.type] : ""}
+                            </span>
+                          </div>
+                        );
+                      })}
+                    </React.Fragment>
+                  );
+                })}
+
+                {/* Bottom file labels */}
+                <div className="w-6 md:w-7 bg-gray-800"></div>
+                {files.map((f, idx) => {
+                  const label = flipped ? files[7 - idx] : f;
+                  return (
+                    <div key={"bot-"+f} className="w-12 md:w-16 bg-gray-800 text-xs text-gray-300 flex items-center justify-center select-none">
+                      {label}
+                    </div>
+                  );
+                })}
+              </div>
+
+              <button
+                onClick={resetGame}
+                className="mt-5 bg-red-600 hover:bg-red-500 px-6 py-2 rounded-lg font-bold transition-all shadow-lg active:scale-95"
+              >
+                New Game
+              </button>
+
+              {/* Enhancement: captured pieces */}
+              <div className="mt-4 w-full max-w-md grid grid-cols-1 gap-3">
+                <div className="bg-gray-800/70 rounded-lg p-3 border border-gray-700">
+                  <div className="text-sm text-gray-300 mb-1">Captured from White</div>
+                  <div className="text-2xl leading-8">
+                    {capturedWhite.length ? capturedWhite.join(" ") : <span className="text-gray-500 text-sm">None</span>}
+                  </div>
+                </div>
+                <div className="bg-gray-800/70 rounded-lg p-3 border border-gray-700">
+                  <div className="text-sm text-gray-300 mb-1">Captured from Black</div>
+                  <div className="text-2xl leading-8">
+                    {capturedBlack.length ? capturedBlack.join(" ") : <span className="text-gray-500 text-sm">None</span>}
+                  </div>
+                </div>
+              </div>
+            </div>
+
+            {/* Enhancement: move history panel */}
+            <div className="bg-gray-800/70 rounded-xl p-4 border border-gray-700 shadow-xl">
+              <div className="flex items-center justify-between mb-3">
+                <h2 className="text-lg font-bold text-yellow-400">Move History</h2>
+                <div className="text-sm text-gray-300">
+                  Moves: {game.history().length}
+                </div>
+              </div>
+
+              <div className="max-h-[420px] overflow-auto pr-1">
+                {pairedHistory.length === 0 ? (
+                  <div className="text-gray-400 text-sm">No moves yet.</div>
+                ) : (
+                  <div className="space-y-2">
+                    {pairedHistory.map((p) => (
+                      <div key={p.moveNumber} className="grid grid-cols-[40px,1fr,1fr] gap-2 items-center bg-gray-900/40 rounded-lg px-2 py-1">
+                        <div className="text-gray-400 text-sm">{p.moveNumber}.</div>
+                        <div className="text-sm">{p.white || "-"}</div>
+                        <div className="text-sm text-gray-200">{p.black || "-"}</div>
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </div>
+
+              <div className="mt-4 text-xs text-gray-400">
+                Tip: Undo/Redo also restores captured pieces + last-move highlight.
+              </div>
+            </div>
+          </div>
+        </div>
+      );
+    }
+
+    const root = ReactDOM.createRoot(document.getElementById("root"));
+    root.render(<ChessApp />);
+  </script>
+</body>
+</html>
